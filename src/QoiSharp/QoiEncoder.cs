@@ -25,21 +25,16 @@ public static class QoiEncoder
 
     public static int Encode(QoiImage image, Span<byte> buffer)
     {
-        if (image.Width == 0)
-        {
-            throw new QoiEncodingException($"Invalid width: {image.Width}");
-        }
-
-        if (image.Height == 0 || image.Height >= QoiCodec.MaxPixels / image.Width)
-        {
-            throw new QoiEncodingException($"Invalid height: {image.Height}. Maximum for this image is {QoiCodec.MaxPixels / image.Width - 1}");
-        }
-
         int width = image.Width;
         int height = image.Height;
         int channels = (int)image.Channels;
         byte colorSpace = (byte)image.ColorSpace;
-        ReadOnlySpan<byte> pixels = image.Data.Span;
+
+        if (image.Width == 0)
+            throw new QoiEncodingException($"Invalid width: {image.Width}");
+
+        if (image.Height == 0 || image.Height >= QoiCodec.MaxPixels / image.Width)
+            throw new QoiEncodingException($"Invalid height: {image.Height}. Maximum for this image is {QoiCodec.MaxPixels / image.Width - 1}");
 
         if (buffer.Length < QoiCodec.HeaderSize + QoiCodec.Padding.Length + (width * height * channels))
             return -1;
@@ -51,25 +46,156 @@ public static class QoiEncoder
         buffer[12] = (byte)channels;
         buffer[13] = colorSpace;
 
-        Span<int> index = stackalloc int[QoiCodec.HashTableSize];
+        ReadOnlySpan<byte> pixels = image.Data.Span.Slice (0, width * height * channels);
 
-        Span<byte> prev = stackalloc byte[4] { 0, 0, 0, 255 };
-        Span<byte> rgba = stackalloc byte[4] { 0, 0, 0, 255 };
-        Span<byte> rgb = rgba.Slice(0, 3);
+        var payload = image.Channels == Channels.Rgb
+            ? Encode3(pixels, buffer.Slice(QoiCodec.HeaderSize))
+            : Encode4(pixels, buffer.Slice(QoiCodec.HeaderSize));
+        return QoiCodec.HeaderSize + payload;
+    }
 
-        Span<int> prevAsInt = MemoryMarshal.Cast<byte, int>(prev);
-        Span<int> rgbaAsInt = MemoryMarshal.Cast<byte, int>(rgba);
+    readonly struct RGB
+    {
+        public readonly byte R;
+        public readonly byte G;
+        public readonly byte B;
+
+        public static bool operator ==(RGB left, RGB right)
+            => left.R == right.R
+            && left.G == right.G
+            && left.B == right.B;
+
+        public static bool operator !=(RGB left, RGB right)
+            => left.R != right.R
+            || left.G != right.G
+            || left.B != right.B;
+    }
+
+    readonly struct RGBA
+    {
+        public readonly byte R;
+        public readonly byte G;
+        public readonly byte B;
+        public readonly byte A;
+
+        public RGBA(byte r, byte b, byte g, byte a)
+            => (R, G, B, A) = (r, g, b, a);
+
+        public static bool operator ==(RGBA left, RGBA right)
+            => left.R == right.R
+            && left.G == right.G
+            && left.B == right.B
+            && left.A == right.A;
+
+        public static bool operator !=(RGBA left, RGBA right)
+            => left.R != right.R
+            || left.G != right.G
+            || left.B != right.B
+            || left.A != right.A;
+    }
+
+    static int Encode3(ReadOnlySpan<byte> input, Span<byte> buffer)
+    {
+        Span<RGB> index = stackalloc RGB[QoiCodec.HashTableSize];
+        index.Clear();
+
+        RGB prev = default;
 
         int run = 0;
         int counter = 0;
-        int p = QoiCodec.HeaderSize;
-        pixels = pixels.Slice(0, width * height * channels);
-        while (pixels.Length > 0)
-        {
-            pixels.Slice(0, channels).CopyTo(rgba);
-            pixels = pixels.Slice(channels);
+        int p = 0;
 
-            if (prevAsInt[0] == rgbaAsInt [0])
+        ReadOnlySpan<RGB> pixels = MemoryMarshal.Cast<byte, RGB>(input);
+        for (int i = 0; i < pixels.Length; i++)
+        {
+            var rgb = pixels[i];
+            if (rgb == prev)
+            {
+                run++;
+                if (run == 62 || i == pixels.Length - 1)
+                {
+                    buffer[p++] = (byte)(QoiCodec.Run | (run - 1));
+                    run = 0;
+                }
+            }
+            else
+            {
+                if (run > 0)
+                {
+                    buffer[p++] = (byte)(QoiCodec.Run | (run - 1));
+                    run = 0;
+                }
+
+                int indexPos = (rgb.R * 3 + rgb.G * 5 + rgb.B * 7 + 255 * 11) % QoiCodec.HashTableSize;
+                if (rgb == index[indexPos])
+                {
+                    buffer[p++] = (byte)(QoiCodec.Index | (indexPos));
+                }
+                else
+                {
+                    index[indexPos] = rgb;
+
+                    int vr = rgb.R - prev.R;
+                    int vg = rgb.G - prev.G;
+                    int vb = rgb.B - prev.B;
+
+                    int vgr = vr - vg;
+                    int vgb = vb - vg;
+
+                    if (vr is > -3 and < 2 &&
+                        vg is > -3 and < 2 &&
+                        vb is > -3 and < 2)
+                    {
+                        counter++;
+                        buffer[p++] = (byte)(QoiCodec.Diff | (vr + 2) << 4 | (vg + 2) << 2 | (vb + 2));
+                    }
+                    else if (vgr is > -9 and < 8 &&
+                             vg is > -33 and < 32 &&
+                             vgb is > -9 and < 8
+                            )
+                    {
+                        buffer[p++] = (byte)(QoiCodec.Luma | (vg + 32));
+                        buffer[p++] = (byte)((vgr + 8) << 4 | (vgb + 8));
+                    }
+                    else
+                    {
+                        if (p + 4 < buffer.Length)
+                        {
+                            buffer[p] = QoiCodec.Rgb;
+                            buffer[p+1] = rgb.R;
+                            buffer[p+2] = rgb.G;
+                            buffer[p+3] = rgb.B;
+                            p += 4;
+                        }
+                    }
+                }
+            }
+            prev = rgb;
+        }
+
+        QoiCodec.Padding.Span.CopyTo(buffer.Slice (p));
+        p += QoiCodec.Padding.Length;
+
+        return p;
+    }
+
+    public static int Encode4(ReadOnlySpan<byte> input, Span<byte> buffer)
+    {
+        Span<RGBA> index = stackalloc RGBA[QoiCodec.HashTableSize];
+        index.Clear();
+
+        RGBA prev = default;
+
+        int run = 0;
+        int counter = 0;
+        int p = 0;
+
+        ReadOnlySpan<RGBA> pixels = MemoryMarshal.Cast<byte, RGBA>(input);
+        for (int i =0; i < pixels.Length; i ++)
+        {
+            var rgba = pixels[i];
+
+            if (prev == rgba)
             {
                 run++;
                 if (run == 62 || pixels.Length == 0)
@@ -86,20 +212,20 @@ public static class QoiEncoder
                     run = 0;
                 }
 
-                int indexPos = (rgba[0] * 3 + rgba[1] * 5 + rgba[2] * 7 + rgba[3] * 11) % QoiCodec.HashTableSize;
-                if (rgbaAsInt[0] == index[indexPos])
+                int indexPos = (rgba.R * 3 + rgba.G * 5 + rgba.B * 7 + rgba.A * 11) % QoiCodec.HashTableSize;
+                if (rgba == index[indexPos])
                 {
                     buffer[p++] = (byte)(QoiCodec.Index | (indexPos));
                 }
                 else
                 {
-                    index[indexPos] = rgbaAsInt[0];
+                    index[indexPos] = rgba;
 
-                    if (rgba[3] == prev[3])
+                    if (rgba.A == prev.A)
                     {
-                        int vr = rgba[0] - prev[0];
-                        int vg = rgba[1] - prev[1];
-                        int vb = rgba[2] - prev[2];
+                        int vr = rgba.R - prev.R;
+                        int vg = rgba.G - prev.G;
+                        int vb = rgba.B - prev.B;
 
                         int vgr = vr - vg;
                         int vgb = vb - vg;
@@ -121,31 +247,37 @@ public static class QoiEncoder
                         }
                         else
                         {
-                            buffer[p++] = QoiCodec.Rgb;
-                            rgb.CopyTo(buffer.Slice(p));
-                            p += 3;
+                            if (p + 4 < buffer.Length)
+                            {
+                                buffer[p] = QoiCodec.Rgb;
+                                buffer[p + 1] = rgba.R;
+                                buffer[p + 2] = rgba.G;
+                                buffer[p + 3] = rgba.B;
+                                p += 4;
+                            }
                         }
                     }
                     else
                     {
-                        buffer[p++] = QoiCodec.Rgba;
-                        rgba.CopyTo(buffer.Slice (p));
-                        p += 4;
+                        if (p + 5 < buffer.Length)
+                        {
+                            buffer[p] = QoiCodec.Rgba;
+                            buffer[p + 1] = rgba.R;
+                            buffer[p + 2] = rgba.G;
+                            buffer[p + 3] = rgba.B;
+                            buffer[p + 4] = rgba.A;
+                            p += 5;
+                        }
                     }
                 }
             }
-            prevAsInt[0] = rgbaAsInt[0];
+            prev = rgba;
         }
 
-        QoiCodec.Padding.Span.CopyTo(buffer.Slice (p));
+        QoiCodec.Padding.Span.CopyTo(buffer.Slice(p));
         p += QoiCodec.Padding.Length;
 
         return p;
     }
 
-    private static bool RgbaEquals(byte r1, byte g1, byte b1, byte a1, byte r2, byte g2, byte b2, byte a2) =>
-        r1 == r2 &&
-        g1 == g2 &&
-        b1 == b2 &&
-        a1 == a2;
 }
