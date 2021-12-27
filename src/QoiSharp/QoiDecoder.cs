@@ -15,13 +15,22 @@ public static class QoiDecoder
     /// <returns>Decoding result.</returns>
     /// <exception cref="QoiDecodingException">Thrown when data is invalid.</exception>
     public static QoiImage Decode(byte[] data)
+        => Decode(new ReadOnlySpan<byte>(data));
+
+    /// <summary>
+    /// Decodes QOI data into raw pixel data.
+    /// </summary>
+    /// <param name="data">QOI data</param>
+    /// <returns>Decoding result.</returns>
+    /// <exception cref="QoiDecodingException">Thrown when data is invalid.</exception>
+    public static QoiImage Decode(ReadOnlySpan<byte> data)
     {
-        if (data.Length < QoiCodec.HeaderSize + QoiCodec.Padding.Length)
+        if (data.Length < QoiCodec.HeaderSize + QoiCodec.ReadOnlyPadding.Length)
         {
             throw new QoiDecodingException("File too short");
         }
         
-        if (!QoiCodec.IsValidMagic(data[..4]))
+        if (!QoiCodec.IsValidMagic(data.Slice (0, 4)))
         {
             throw new QoiDecodingException("Invalid file magic"); // TODO: add magic value
         }
@@ -35,9 +44,9 @@ public static class QoiDecoder
         {
             throw new QoiDecodingException($"Invalid width: {width}");
         }
-        if (height == 0 || height >= QoiCodec.MaxPixels / width)
+        if (height == 0 || height >= QoiCodec.MaxPixelsReadOnly / width)
         {
-            throw new QoiDecodingException($"Invalid height: {height}. Maximum for this image is {QoiCodec.MaxPixels / width - 1}");
+            throw new QoiDecodingException($"Invalid height: {height}. Maximum for this image is {QoiCodec.MaxPixelsReadOnly / width - 1}");
         }
         if (channels is not 3 and not 4)
         {
@@ -129,15 +138,9 @@ public static class QoiDecoder
             }
         }
         
-        int pixelsEnd = data.Length - QoiCodec.Padding.Length;
-        for (int padIdx = 0; padIdx < QoiCodec.Padding.Length; padIdx++) 
-        {
-            if (data[pixelsEnd + padIdx] != QoiCodec.Padding[padIdx]) 
-            {
-                throw new InvalidOperationException("Invalid padding");
-            }
-        }
+        if (!QoiCodec.ReadOnlyPadding.Span.SequenceEqual(data.Slice(data.Length - QoiCodec.ReadOnlyPadding.Length)))
+            throw new InvalidOperationException("Invalid padding");
 
-        return new QoiImage(pixels, width, height, (Channels)channels, colorSpace);
+        return new QoiImage (pixels, width, height, (Channels)channels, colorSpace);
     }
 }
