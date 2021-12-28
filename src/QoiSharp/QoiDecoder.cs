@@ -1,6 +1,8 @@
 ﻿using QoiSharp.Codec;
 using QoiSharp.Exceptions;
 
+using System.Runtime.InteropServices;
+
 namespace QoiSharp;
 
 /// <summary>
