@@ -1,4 +1,4 @@
-﻿using QoiSharp.Codec;
+using QoiSharp.Codec;
 using QoiSharp.Exceptions;
 
 namespace QoiSharp;
@@ -54,7 +54,6 @@ public static class QoiDecoder
         }
 
         Span<uint> index = stackalloc uint[QoiCodec.HashTableSize];
-        index.Fill(255);
 
         byte[] pixels = new byte[width * height * channels];
 
@@ -104,7 +103,7 @@ public static class QoiDecoder
                 g += (byte)vg;
                 b += (byte)(vg - 8 + (b2 & 0x0F));
             }
-            else if ((b1 & QoiCodec.Mask2) == QoiCodec.Run && b1 != QoiCodec.Run) // Only execute this block if there's at least 1 additional run.
+            else if ((b1 & QoiCodec.Mask2) == QoiCodec.Run)
             {
                 int run = b1 & 0x3F;
                 int end = pxPos + run * channels;
